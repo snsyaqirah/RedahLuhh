@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(npm install:*)",
+      "Bash(.venv/Scripts/python -c \"from app.main import app; print\\('Backend OK —', app.title\\)\")",
+      "Bash(.venv/Scripts/python -c \"from app.routers.weather_route import router; print\\([r.path for r in router.routes]\\)\")",
+      "Bash(.venv/Scripts/python -c \"from app.services.weather_service import get_weather_for_waypoints; from app.routers.weather_route import router; print\\('OK — routes:', [r.path for r in router.routes]\\)\")",
+      "Bash(.venv/Scripts/python -c \"from app.services.weather_service import _classify; r = [_classify\\(c,p\\)[:3] for c,p in [\\(80,20\\),\\(80,50\\),\\(95,90\\),\\(0,0\\),\\(63,30\\),\\(63,60\\)]]; print\\(r\\)\")",
+      "Bash(.venv/Scripts/python -c \"from app.services.weather_service import get_weather_for_waypoints; from app.config import settings; print\\('OK, weatherapi_key field exists:', 'weatherapi_key' in settings.model_fields\\)\")",
+      "Bash(curl -s \"https://api.data.gov.my/weather/warning?limit=3\")",
+      "Bash(python -m json.tool)",
+      "Bash(curl -s \"https://api.data.gov.my/weather/forecast?contains=Gombak@location__location_name&limit=2\")",
+      "Bash(.venv/Scripts/python -c ':*)"
+    ]
+  }
+}
