@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "standalone",
+  // "standalone" is for Docker — Vercel handles its own build, so remove it
+  // when deploying to Vercel. Keep it here; Vercel ignores it.
   reactStrictMode: true,
 };
 
