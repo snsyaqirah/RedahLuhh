@@ -12,7 +12,8 @@
       "Bash(curl -s \"https://api.data.gov.my/weather/warning?limit=3\")",
       "Bash(python -m json.tool)",
       "Bash(curl -s \"https://api.data.gov.my/weather/forecast?contains=Gombak@location__location_name&limit=2\")",
-      "Bash(.venv/Scripts/python -c ':*)"
+      "Bash(.venv/Scripts/python -c ':*)",
+      "Bash(npm run:*)"
     ]
   }
 }
