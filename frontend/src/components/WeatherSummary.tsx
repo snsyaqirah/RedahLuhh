@@ -90,7 +90,7 @@ export function WeatherSummary({ data, onRefresh, refreshing }: WeatherSummaryPr
 
       {/* ── Refresh ─────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between text-xs text-white/25">
-        <span>Updated {format(new Date(last_updated), "HH:mm:ss")} · WeatherAPI + MET Malaysia</span>
+        <span>Updated {format(new Date(last_updated), "HH:mm:ss")} · Tomorrow.io → Open-Meteo → WeatherAPI · Warnings: MET Malaysia</span>
         <button
           onClick={onRefresh}
           disabled={refreshing}

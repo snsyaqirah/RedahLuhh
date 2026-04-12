@@ -14,6 +14,7 @@ export const metadata: Metadata = {
     "RedahLuhh menyemak cuaca masa nyata sepanjang laluan perjalanan anda di Malaysia — bukan sekadar destinasi. Tahu hujan, ribut petir, atau cuaca mendung di setiap kilometer laluan sebelum anda bergerak. Real-time weather along your route for Malaysian riders.",
   keywords: [
     "RedahLuhh",
+    "Redah Luhh",
     "weather along route Malaysia",
     "real time weather Malaysia road",
     "cuaca laluan Malaysia",
@@ -69,6 +70,10 @@ export const metadata: Metadata = {
 
   alternates: {
     canonical: BASE_URL,
+  },
+
+  verification: {
+    google: "b80995200b332325",
   },
 
   appleWebApp: {

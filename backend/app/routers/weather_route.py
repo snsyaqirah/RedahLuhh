@@ -136,7 +136,12 @@ async def _build_route_response(
         num_points=n_points,
     )
 
-    # WeatherAPI conditions for all waypoints (fired in parallel inside the service)
+    # Mark start + destination for real-time fetch (not forecast)
+    if sampled:
+        sampled[0]["realtime"]  = True
+        sampled[-1]["realtime"] = True
+
+    # Weather conditions for all waypoints
     conditions = await get_weather_for_waypoints(sampled)
     for wp, cond in zip(sampled, conditions):
         wp["weather"] = cond
