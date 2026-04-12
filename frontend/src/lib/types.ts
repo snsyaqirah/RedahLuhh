@@ -55,3 +55,25 @@ export interface RouteWeatherRequest {
   destination: string;
   departure_time?: string;
 }
+
+// ── Feedback ───────────────────────────────────────────────────────────────
+
+export type FeedbackCategory = "bug" | "enhancement" | "general" | "testimonial";
+
+export interface AdminReply {
+  id: string;
+  feedback_id: string;
+  reply: string;
+  status: number;
+  created_at: string;
+}
+
+export interface Feedback {
+  id: string;
+  category: FeedbackCategory;
+  description: string;
+  suggested_fix: string | null;
+  status: number;
+  created_at: string;
+  admin_replies?: AdminReply[];
+}

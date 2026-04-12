@@ -8,6 +8,7 @@ import clsx from "clsx";
 import { RouteForm } from "@/components/RouteForm";
 import { WeatherSummary } from "@/components/WeatherSummary";
 import { useRouteWeather } from "@/hooks/useRouteWeather";
+import { useBackendHealth } from "@/hooks/useBackendHealth";
 import { RouteWeatherResponse, Waypoint } from "@/lib/types";
 
 // WeatherMap uses useMap which must run client-side
@@ -24,10 +25,23 @@ const STATUS_SCORE_BG: Record<string, string> = {
   red:    "bg-red-500/15 border-red-500/30 text-red-300",
 };
 
+const BACKEND_DOT: Record<string, string> = {
+  checking: "bg-yellow-400 animate-pulse",
+  online:   "bg-green-400",
+  offline:  "bg-red-500",
+};
+
+const BACKEND_LABEL: Record<string, string> = {
+  checking: "Starting up…",
+  online:   "Live",
+  offline:  "Offline",
+};
+
 export default function HomePage() {
   const { data, selectedRoute, selectedIndex, setSelectedIndex, loading, error, search, refresh } =
     useRouteWeather();
   const [activeTab, setActiveTab] = useState<"map" | "summary">("map");
+  const backendStatus = useBackendHealth();
 
   const handleSearch = (origin: string, destination: string, departure?: Date) => {
     search({
@@ -54,8 +68,8 @@ export default function HomePage() {
               </p>
             </div>
             <div className="ml-auto flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-              <span className="text-xs text-white/30">Live</span>
+              <span className={clsx("w-1.5 h-1.5 rounded-full", BACKEND_DOT[backendStatus])} />
+              <span className="text-xs text-white/30">{BACKEND_LABEL[backendStatus]}</span>
             </div>
           </div>
         </header>
@@ -152,7 +166,11 @@ export default function HomePage() {
 
         {/* ── Footer ── */}
         <footer className="border-t border-white/5 py-4 text-center text-xs text-white/20">
-          RedahLuhh · SDG 11 &amp; 13 · Built for Malaysian riders
+          RedahLuhh by{" "}
+          <a href="https://syaqi.dev" target="_blank" rel="noopener noreferrer" className="hover:text-white/50 transition-colors underline underline-offset-2">
+            Syaqirah
+          </a>
+          {" "}· Built for Malaysian riders
         </footer>
       </div>
     </APIProvider>

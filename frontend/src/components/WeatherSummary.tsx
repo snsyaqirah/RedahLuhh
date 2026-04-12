@@ -81,7 +81,7 @@ export function WeatherSummary({ data, onRefresh, refreshing }: WeatherSummaryPr
           ))}
         </div>
         {/* Scrollable cards */}
-        <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin">
+        <div className="flex gap-3 overflow-x-auto pt-1 pb-2 scrollbar-thin">
           {waypoints.map((wp) => (
             <WeatherCard key={wp.index} waypoint={wp} />
           ))}
