@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import { Map, AdvancedMarker, useMap } from "@vis.gl/react-google-maps";
 import clsx from "clsx";
 import { decodePolyline } from "@/lib/api";
@@ -48,7 +47,6 @@ function ColoredRoute({
     const path = decodePolyline(encodedPolyline);
     if (!path.length) return;
 
-    // Group consecutive points by status into segments
     type Seg = { path: { lat: number; lng: number }[]; status: WeatherStatus };
     const segments: Seg[] = [];
     let curStatus = nearestStatus(path[0].lat, path[0].lng, waypoints);
@@ -65,7 +63,6 @@ function ColoredRoute({
     }
     if (curSeg.length) segments.push({ path: curSeg, status: curStatus });
 
-    // Draw each segment
     linesRef.current = segments.map(
       (seg) =>
         new google.maps.Polyline({
@@ -78,7 +75,6 @@ function ColoredRoute({
         })
     );
 
-    // Fit map to route
     const bounds = new google.maps.LatLngBounds();
     path.forEach((p) => bounds.extend(p));
     map.fitBounds(bounds, 60);
@@ -92,7 +88,18 @@ function ColoredRoute({
   return null;
 }
 
-// ── Floating emoji marker (no pin backing) ────────────────────────────────
+// ── Trigger Google Maps resize when container changes size ────────────────
+function MapResizeTrigger({ trigger }: { trigger: boolean }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!map) return;
+    const t = setTimeout(() => google.maps.event.trigger(map, "resize"), 80);
+    return () => clearTimeout(t);
+  }, [map, trigger]);
+  return null;
+}
+
+// ── Floating emoji marker ──────────────────────────────────────────────────
 function EmojiMarker({ waypoint }: { waypoint: Waypoint }) {
   const isEndpoint =
     waypoint.label === "Start" || waypoint.label === "Destination";
@@ -103,37 +110,12 @@ function EmojiMarker({ waypoint }: { waypoint: Waypoint }) {
       title={`${waypoint.label}: ${waypoint.weather.description} · ${waypoint.weather.temperature}°C`}
       zIndex={isEndpoint ? 10 : 5}
     >
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 1,
-          cursor: "default",
-        }}
-      >
-        <span
-          style={{
-            fontSize: isEndpoint ? 26 : 20,
-            lineHeight: 1,
-            filter: "drop-shadow(0 1px 4px rgba(0,0,0,0.9))",
-          }}
-        >
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, cursor: "default" }}>
+        <span style={{ fontSize: isEndpoint ? 26 : 20, lineHeight: 1, filter: "drop-shadow(0 1px 4px rgba(0,0,0,0.9))" }}>
           {waypoint.weather.icon_code || "🌡️"}
         </span>
         {isEndpoint && (
-          <span
-            style={{
-              fontSize: 9,
-              fontWeight: 700,
-              color: "#fff",
-              background: "rgba(0,0,0,0.65)",
-              borderRadius: 4,
-              padding: "1px 4px",
-              letterSpacing: "0.04em",
-              backdropFilter: "blur(4px)",
-            }}
-          >
+          <span style={{ fontSize: 9, fontWeight: 700, color: "#fff", background: "rgba(0,0,0,0.65)", borderRadius: 4, padding: "1px 4px", letterSpacing: "0.04em", backdropFilter: "blur(4px)" }}>
             {waypoint.label.toUpperCase()}
           </span>
         )}
@@ -147,75 +129,34 @@ function GpsDot({ position }: { position: { lat: number; lng: number } }) {
   return (
     <AdvancedMarker position={position} zIndex={20} title="You are here">
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-        {/* Pulse ring */}
         <div style={{ position: "relative" }}>
-          <div
-            style={{
-              position: "absolute",
-              inset: -10,
-              borderRadius: "50%",
-              background: "rgba(59,130,246,0.2)",
-              animation: "pulse 2s ease-in-out infinite",
-            }}
-          />
-          <span style={{ fontSize: 28, lineHeight: 1, filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.9))" }}>
-            🏍️
-          </span>
+          <div style={{ position: "absolute", inset: -10, borderRadius: "50%", background: "rgba(59,130,246,0.2)", animation: "pulse 2s ease-in-out infinite" }} />
+          <span style={{ fontSize: 28, lineHeight: 1, filter: "drop-shadow(0 2px 6px rgba(0,0,0,0.9))" }}>🏍️</span>
         </div>
-        <span
-          style={{
-            fontSize: 9,
-            fontWeight: 700,
-            color: "#fff",
-            background: "#3b82f6",
-            borderRadius: 4,
-            padding: "1px 5px",
-            letterSpacing: "0.04em",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.5)",
-          }}
-        >
-          YOU
-        </span>
+        <span style={{ fontSize: 9, fontWeight: 700, color: "#fff", background: "#3b82f6", borderRadius: 4, padding: "1px 5px", letterSpacing: "0.04em", boxShadow: "0 1px 4px rgba(0,0,0,0.5)" }}>YOU</span>
       </div>
     </AdvancedMarker>
   );
 }
 
-// ── Map controller: follow GPS or fit route ───────────────────────────────
-function MapController({
-  encodedPolyline,
-  gpsPos,
-  following,
-}: {
-  encodedPolyline: string;
-  gpsPos: { lat: number; lng: number } | null;
-  following: boolean;
-}) {
+// ── Map controller: follow GPS ────────────────────────────────────────────
+function MapController({ encodedPolyline, gpsPos, following }: { encodedPolyline: string; gpsPos: { lat: number; lng: number } | null; following: boolean }) {
   const map = useMap();
-
-  // When following mode starts, center on GPS
   useEffect(() => {
     if (!map || !following || !gpsPos) return;
     map.panTo(gpsPos);
     map.setZoom(16);
   }, [map, following, gpsPos?.lat, gpsPos?.lng]);
-
   return null;
 }
 
-// ── Navigate button ────────────────────────────────────────────────────────
-function NavigateButton({
-  following,
-  onToggle,
-}: {
-  following: boolean;
-  onToggle: () => void;
-}) {
+// ── Navigate button ───────────────────────────────────────────────────────
+function NavigateButton({ following, onToggle }: { following: boolean; onToggle: () => void }) {
   return (
     <button
       onClick={onToggle}
       className={clsx(
-        "absolute top-4 right-4 flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl shadow-lg transition-all active:scale-95",
+        "absolute top-4 right-4 flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-xl shadow-lg transition-colors active:scale-95",
         following
           ? "bg-blue-500 hover:bg-blue-600 text-white ring-2 ring-white/30"
           : "bg-brand-500 hover:bg-brand-600 text-white"
@@ -241,14 +182,45 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [minutesAgo, setMinutesAgo]   = useState(0);
 
+  const containerRef    = useRef<HTMLDivElement>(null);
   const watchIdRef      = useRef<number | null>(null);
   const wakeLockRef     = useRef<any>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const minuteTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Day/night map theme — Malaysia local time (UTC+8), 06:00-19:00 = light
-  const localHour = (new Date().getUTCHours() + 8) % 24;
+  // Day/night map theme — Malaysia local time (UTC+8)
+  const localHour   = (new Date().getUTCHours() + 8) % 24;
   const colorScheme = localHour >= 6 && localHour < 19 ? "LIGHT" as const : "DARK" as const;
+
+  // Full-screen via direct DOM style — avoids React re-mounting the Map component.
+  // CSS class approach causes unmount/remount; portal causes the same. Direct style
+  // manipulation keeps the Google Maps SDK alive across the transition.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (following) {
+      el.style.position   = "fixed";
+      el.style.top        = "0";
+      el.style.right      = "0";
+      el.style.bottom     = "0";
+      el.style.left       = "0";
+      el.style.zIndex     = "60";
+      el.style.borderRadius = "0";
+      el.style.boxShadow  = "none";
+      document.body.style.overflow = "hidden";
+    } else {
+      el.style.position   = "";
+      el.style.top        = "";
+      el.style.right      = "";
+      el.style.bottom     = "";
+      el.style.left       = "";
+      el.style.zIndex     = "";
+      el.style.borderRadius = "";
+      el.style.boxShadow  = "";
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [following]);
 
   // Release wake lock when tab is hidden
   useEffect(() => {
@@ -273,7 +245,6 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
     setLastRefresh(new Date());
     setMinutesAgo(0);
 
-    // Request screen wake lock
     try {
       if ("wakeLock" in navigator) {
         wakeLockRef.current = await (navigator as any).wakeLock.request("screen");
@@ -282,7 +253,6 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
       }
     } catch {}
 
-    // 15-minute weather refresh interval
     if (onRefresh) {
       refreshTimerRef.current = setInterval(() => {
         onRefresh();
@@ -291,7 +261,6 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
       }, 15 * 60 * 1000);
     }
 
-    // Per-minute counter for "Updated X min ago" badge
     minuteTimerRef.current = setInterval(() => {
       setMinutesAgo((m) => m + 1);
     }, 60_000);
@@ -317,34 +286,23 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
       wakeLockRef.current = null;
       setWakeLockActive(false);
     }
-    if (refreshTimerRef.current) {
-      clearInterval(refreshTimerRef.current);
-      refreshTimerRef.current = null;
-    }
-    if (minuteTimerRef.current) {
-      clearInterval(minuteTimerRef.current);
-      minuteTimerRef.current = null;
-    }
+    if (refreshTimerRef.current) { clearInterval(refreshTimerRef.current); refreshTimerRef.current = null; }
+    if (minuteTimerRef.current)  { clearInterval(minuteTimerRef.current);  minuteTimerRef.current  = null; }
   }, []);
 
-  // Clean up all timers + watchers on unmount
   useEffect(() => {
     return () => {
       if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
       if (wakeLockRef.current) wakeLockRef.current.release();
       if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
-      if (minuteTimerRef.current) clearInterval(minuteTimerRef.current);
+      if (minuteTimerRef.current)  clearInterval(minuteTimerRef.current);
     };
   }, []);
 
-  const mapContainer = (
+  return (
     <div
-      className={clsx(
-        "relative overflow-hidden",
-        following
-          ? "fixed inset-0 z-[60]"
-          : "w-full h-[480px] rounded-2xl ring-1 ring-white/10"
-      )}
+      ref={containerRef}
+      className="relative overflow-hidden w-full h-[480px] rounded-2xl ring-1 ring-white/10"
     >
       <Map
         mapId="redahluhh-map"
@@ -355,10 +313,7 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
         style={{ width: "100%", height: "100%" }}
         colorScheme={colorScheme}
       >
-        <ColoredRoute
-          encodedPolyline={data.route.encoded_polyline}
-          waypoints={data.waypoints}
-        />
+        <ColoredRoute encodedPolyline={data.route.encoded_polyline} waypoints={data.waypoints} />
         {data.waypoints.map((wp) => (
           <EmojiMarker key={wp.index} waypoint={wp} />
         ))}
@@ -368,38 +323,30 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
           gpsPos={gpsPos}
           following={following}
         />
+        <MapResizeTrigger trigger={following} />
       </Map>
 
-      {/* Go Now / Stop toggle — top right */}
-      <NavigateButton
-        following={following}
-        onToggle={following ? stopFollowing : startFollowing}
-      />
+      <NavigateButton following={following} onToggle={following ? stopFollowing : startFollowing} />
 
-      {/* GPS error */}
       {gpsError && (
         <div className="absolute top-14 right-4 bg-red-500/90 text-white text-xs rounded-xl px-3 py-2 max-w-[200px] shadow-lg">
           {gpsError}
         </div>
       )}
 
-      {/* Legend — bottom left */}
       <div className="absolute bottom-4 left-4 bg-black/70 backdrop-blur-sm rounded-xl px-3 py-2 text-xs text-white/80 space-y-1 ring-1 ring-white/10">
         <LegendRow color={SEG_COLOR.green}  label="Clear / Partly Cloudy" />
         <LegendRow color={SEG_COLOR.yellow} label="Cloudy / Light Rain" />
         <LegendRow color={SEG_COLOR.red}    label="Rain / Storm" />
       </div>
 
-      {/* Following mode indicators — top left */}
       {following && (
         <div className="absolute top-4 left-4 flex flex-col gap-1.5">
           <div className="bg-blue-500/90 backdrop-blur-sm text-white text-xs font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-lg">
             <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
             Live GPS
             {wakeLockActive && (
-              <span className="ml-1 bg-white/25 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide">
-                Screen On
-              </span>
+              <span className="ml-1 bg-white/25 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide">Screen On</span>
             )}
           </div>
           {lastRefresh && (
@@ -411,13 +358,6 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
       )}
     </div>
   );
-
-  // Portal into document.body when full-screen so it escapes any CSS transform
-  // containing block created by parent animations (e.g. animate-slide-up).
-  if (following && typeof document !== "undefined") {
-    return createPortal(mapContainer, document.body);
-  }
-  return mapContainer;
 }
 
 function LegendRow({ color, label }: { color: string; label: string }) {
