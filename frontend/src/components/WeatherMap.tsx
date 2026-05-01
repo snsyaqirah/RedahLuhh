@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Map, AdvancedMarker, useMap } from "@vis.gl/react-google-maps";
 import clsx from "clsx";
 import { decodePolyline } from "@/lib/api";
@@ -336,13 +337,13 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
     };
   }, []);
 
-  return (
+  const mapContainer = (
     <div
       className={clsx(
-        "relative overflow-hidden ring-1 ring-white/10 transition-all",
+        "relative overflow-hidden",
         following
-          ? "fixed inset-0 z-[60] rounded-none"
-          : "w-full h-[480px] rounded-2xl"
+          ? "fixed inset-0 z-[60]"
+          : "w-full h-[480px] rounded-2xl ring-1 ring-white/10"
       )}
     >
       <Map
@@ -410,6 +411,13 @@ export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
       )}
     </div>
   );
+
+  // Portal into document.body when full-screen so it escapes any CSS transform
+  // containing block created by parent animations (e.g. animate-slide-up).
+  if (following && typeof document !== "undefined") {
+    return createPortal(mapContainer, document.body);
+  }
+  return mapContainer;
 }
 
 function LegendRow({ color, label }: { color: string; label: string }) {
