@@ -1,10 +1,13 @@
 """
-Weather service — cascade fallback:
-  1st: Tomorrow.io   (best ML model for SE Asia, 500 calls/day free)
-  2nd: Open-Meteo    (ECMWF model, fully free, no key needed)
-  3rd: WeatherAPI    (GFS model, 1M calls/month free)
+Weather service — 5-provider cascade fallback:
+  1. XWeather      — road weather, SE Asia
+  2. Meteoblue     — high-res, good tropics coverage
+  3. Tomorrow.io   — ML-enhanced, realtime for start/dest
+  4. Open-Meteo    — ECMWF, fully free, no limit
+  5. WeatherAPI    — GFS, last resort
 
-Provider state resets on server restart (fine — Render free tier restarts daily).
+Provider exhaustion flags are module-level and reset on server restart.
+They are exported so the router can expose them via /api/provider-status.
 """
 import logging
 import math
@@ -18,9 +21,16 @@ from app.models.schemas import WeatherCondition
 
 log = logging.getLogger(__name__)
 
-# ── Module-level exhaustion flags (reset on restart) ──────────────────────
-_tomorrow_exhausted: bool = False
-_open_meteo_exhausted: bool = False
+
+class _RateLimitError(Exception):
+    pass
+
+
+# ── Module-level exhaustion flags (exported for /api/provider-status) ─────
+xweather_exhausted:    bool = False
+meteoblue_exhausted:   bool = False
+tomorrow_exhausted:    bool = False
+open_meteo_exhausted:  bool = False
 
 
 # ===========================================================================
@@ -36,7 +46,7 @@ def _forecast_days(eta: datetime) -> int:
 
 
 def _is_day(eta: datetime) -> bool:
-    """Rough day/night check based on Malaysia local time (UTC+8)."""
+    """Rough day/night check for Malaysia (UTC+8)."""
     local_hour = (eta.hour + 8) % 24
     return 6 <= local_hour < 19
 
@@ -52,32 +62,198 @@ def _fallback() -> WeatherCondition:
 def _from_measurements(
     precip_mm: float, cloud: int, day: bool, chance_rain: float = 0
 ) -> tuple[str, str, str] | None:
-    """
-    Reality-check: derive status from actual sensor values.
-    Filters out GFS/ECMWF model artefacts (0.1–0.7mm phantom rain).
-    """
-    if precip_mm >= 5:
-        return "red",    "Heavy Rain",   "🌧️"
-    if precip_mm >= 2:
-        return "red",    "Rain",         "🌧️"
-    if precip_mm >= 1.0:
-        return "yellow", "Light Rain",   "🌦️"
+    """Reality-check: filter GFS/ECMWF phantom rain artefacts."""
+    if precip_mm >= 5:   return "red",    "Heavy Rain",   "🌧️"
+    if precip_mm >= 2:   return "red",    "Rain",         "🌧️"
+    if precip_mm >= 1.0: return "yellow", "Light Rain",   "🌦️"
     if precip_mm >= 0.5 and chance_rain >= 40:
-        return "yellow", "Light Rain",   "🌦️"
-    if cloud >= 80:
-        return "yellow", "Overcast",     "☁️"
-    if cloud >= 50:
-        return "yellow", "Cloudy",       "☁️"
+                         return "yellow", "Light Rain",   "🌦️"
+    if cloud >= 80:      return "yellow", "Overcast",     "☁️"
+    if cloud >= 50:      return "yellow", "Cloudy",       "☁️"
     if cloud <= 15:
-        desc  = "Clear"      if day else "Clear Night"
-        emoji = "☀️"        if day else "🌙"
-        return "green", desc, emoji
+        return "green", ("Clear" if day else "Clear Night"), ("☀️" if day else "🌙")
     return "green", "Partly Cloudy", "⛅"
 
 
 # ===========================================================================
-# Provider 1 — Tomorrow.io
+# Provider 1 — XWeather (road weather)
 # ===========================================================================
+
+XWEATHER_URL = "https://data.api.xweather.com/roadweather/{loc}"
+
+# weatherPrimaryCoded suffix → status
+# Format: [qualifier:][coverage:]weather  e.g. "::CL", "::RA", "HVY::TSRA"
+def _xweather_status(coded: str, precip_mm: float, cloud_pct: int, day: bool) -> tuple[str, str, str]:
+    c = (coded or "").upper()
+    if any(x in c for x in ["TSRA", "TS", ":LTG"]):
+        return "red", "Thunderstorm", "⛈️"
+    if any(x in c for x in [":RA", "SHRA", "FZRA", "RAIN"]):
+        return "red" if precip_mm >= 2 else "yellow", "Rain" if precip_mm >= 2 else "Light Rain", "🌧️" if precip_mm >= 2 else "🌦️"
+    if c.endswith(":OV") or c.endswith("OVC"):
+        return "yellow", "Overcast", "☁️"
+    if any(x in c for x in [":BK", ":SC", "SCT", "BKN", "FOG", "MIST", "FG"]):
+        return "yellow", "Cloudy", "☁️"
+    # CL, FW, SKC, CLR → green
+    return "green", ("Clear" if day else "Clear Night"), ("☀️" if day else "🌙")
+
+
+async def _get_xweather(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
+    resp = await client.get(
+        XWEATHER_URL.format(loc=f"{wp['lat']},{wp['lng']}"),
+        params={
+            "client_id":     settings.xweather_client_id,
+            "client_secret": settings.xweather_client_secret,
+            "format":        "json",
+            "filter":        "allstations",
+        },
+        timeout=10.0,
+    )
+    if resp.status_code in (429, 403):
+        raise _RateLimitError("XWeather")
+    resp.raise_for_status()
+
+    data = resp.json()
+    if not data.get("success") or not data.get("response"):
+        raise ValueError("XWeather: empty response")
+
+    ob   = data["response"][0]["ob"]
+    day  = _is_day(wp["eta"])
+
+    temp        = float(ob.get("tempC") or 0)
+    feels       = float(ob.get("feelslikeC") or temp)
+    humidity    = int(ob.get("humidity") or 0)
+    wind_ms     = round(float(ob.get("windSpeedKPH") or 0) / 3.6, 1)
+    precip_mm   = float(ob.get("precipMM") or 0)
+    cloud_pct   = int(ob.get("sky") or 50)
+    coded       = ob.get("weatherPrimaryCoded", "")
+
+    measured = _from_measurements(precip_mm, cloud_pct, day)
+    if measured:
+        status, description, emoji = measured
+    else:
+        status, description, emoji = _xweather_status(coded, precip_mm, cloud_pct, day)
+
+    log.debug("[XWeather] (%.4f,%.4f) coded=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], coded, precip_mm, description)
+
+    return WeatherCondition(
+        status=status, label="", description=description,
+        temperature=round(temp, 1), feels_like=round(feels, 1),
+        humidity=humidity, wind_speed=wind_ms,
+        precipitation_prob=round(precip_mm / 10, 2),
+        weather_code=0, icon_code=emoji,
+    )
+
+
+# ===========================================================================
+# Provider 2 — Meteoblue
+# ===========================================================================
+
+METEOBLUE_URL = "https://my.meteoblue.com/packages/basic-1h"
+
+# Pictocode → (status, description, emoji)
+# fmt: off
+METEOBLUE_CONDITIONS: dict[int, tuple[str, str, str]] = {
+    1:  ("green",  "Clear",          "☀️"),
+    2:  ("green",  "Mostly Clear",   "⛅"),
+    3:  ("green",  "Partly Cloudy",  "⛅"),
+    4:  ("yellow", "Overcast",       "☁️"),
+    5:  ("yellow", "Fog",            "🌫️"),
+    6:  ("yellow", "Freezing Fog",   "🌫️"),
+    7:  ("yellow", "Light Rain",     "🌦️"),
+    8:  ("yellow", "Rain Shower",    "🌦️"),
+    9:  ("red",    "Heavy Shower",   "🌧️"),
+    10: ("red",    "Rain",           "🌧️"),
+    11: ("red",    "Heavy Rain",     "🌧️"),
+    12: ("red",    "Rain & Snow",    "🌧️"),
+    13: ("red",    "Heavy Mix",      "🌧️"),
+    14: ("red",    "Sleet",          "🌧️"),
+    15: ("red",    "Heavy Sleet",    "🌧️"),
+    16: ("yellow", "Light Snow",     "❄️"),
+    17: ("red",    "Snow Shower",    "❄️"),
+    18: ("red",    "Snow",           "❄️"),
+    19: ("red",    "Heavy Snow",     "❄️"),
+    20: ("red",    "Ice Rain",       "🌧️"),
+    21: ("red",    "Thunderstorm",   "⛈️"),
+    22: ("red",    "Light Thunder",  "⛈️"),
+    23: ("red",    "Thunder & Rain", "⛈️"),
+    24: ("red",    "Thunder & Hail", "⛈️"),
+    25: ("red",    "Thunder & Hail", "⛈️"),
+    26: ("green",  "Mostly Clear",   "🌙"),   # night variants
+    27: ("green",  "Partly Cloudy",  "🌙"),
+    28: ("green",  "Clear Night",    "🌙"),
+    29: ("yellow", "Overcast",       "☁️"),
+    30: ("red",    "Rain",           "🌧️"),
+}
+# fmt: on
+
+
+async def _get_meteoblue(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
+    resp = await client.get(
+        METEOBLUE_URL,
+        params={
+            "apikey":  settings.meteoblue_api_key,
+            "lat":     wp["lat"],
+            "lon":     wp["lng"],
+            "asl":     50,       # default altitude (m) for Malaysia lowlands
+            "format":  "json",
+        },
+        timeout=10.0,
+    )
+    if resp.status_code in (429, 403):
+        raise _RateLimitError("Meteoblue")
+    resp.raise_for_status()
+
+    data = resp.json()
+    h1   = data.get("data_1h", {})
+    times = h1.get("time", [])
+    if not times:
+        raise ValueError("Meteoblue: no hourly data")
+
+    target_ts = wp["eta"].timestamp()
+    best_i = min(
+        range(len(times)),
+        key=lambda i: abs(
+            datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc).timestamp() - target_ts
+        ),
+    )
+
+    def hv(field):
+        vals = h1.get(field, [])
+        return vals[best_i] if best_i < len(vals) else 0
+
+    pictocode   = int(hv("pictocode") or 1)
+    temp        = float(hv("temperature") or 0)
+    humidity    = int(hv("relativehumidity") or 0)
+    wind_ms     = round(float(hv("windspeed") or 0) / 3.6, 1)  # km/h → m/s
+    precip_mm   = float(hv("precipitation") or 0)
+    chance_rain = float(hv("precipitation_probability") or 0)
+    day         = _is_day(wp["eta"])
+
+    measured = _from_measurements(precip_mm, 50, day, chance_rain)
+    if measured:
+        status, description, emoji = measured
+    else:
+        status, description, emoji = METEOBLUE_CONDITIONS.get(pictocode, ("green", "Clear", "☀️"))
+
+    log.debug("[Meteoblue] (%.4f,%.4f) picto=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], pictocode, precip_mm, description)
+
+    return WeatherCondition(
+        status=status, label="", description=description,
+        temperature=round(temp, 1), feels_like=round(temp, 1),
+        humidity=humidity, wind_speed=wind_ms,
+        precipitation_prob=round(max(precip_mm / 10, chance_rain / 100), 2),
+        weather_code=pictocode, icon_code=emoji,
+    )
+
+
+# ===========================================================================
+# Provider 3 — Tomorrow.io
+# ===========================================================================
+
+TOMORROW_REALTIME_URL = "https://api.tomorrow.io/v4/weather/realtime"
+TOMORROW_FORECAST_URL = "https://api.tomorrow.io/v4/weather/forecast"
 
 # fmt: off
 TOMORROW_CONDITIONS: dict[int, tuple[str, str, str]] = {
@@ -96,29 +272,19 @@ TOMORROW_CONDITIONS: dict[int, tuple[str, str, str]] = {
 }
 # fmt: on
 
-TOMORROW_REALTIME_URL = "https://api.tomorrow.io/v4/weather/realtime"
-TOMORROW_FORECAST_URL = "https://api.tomorrow.io/v4/weather/forecast"
-
 
 async def _get_tomorrow_realtime(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
-    """Use Tomorrow.io /realtime for start & destination — actual sensor data."""
     resp = await client.get(
         TOMORROW_REALTIME_URL,
-        params={
-            "location": f"{wp['lat']},{wp['lng']}",
-            "apikey":   settings.tomorrow_api_key,
-            "units":    "metric",
-        },
+        params={"location": f"{wp['lat']},{wp['lng']}", "apikey": settings.tomorrow_api_key, "units": "metric"},
         timeout=10.0,
     )
-
     if resp.status_code == 429:
-        raise _RateLimitError("Tomorrow.io realtime")
-
+        raise _RateLimitError("Tomorrow.io")
     resp.raise_for_status()
-    v   = resp.json()["data"]["values"]
-    day = _is_day(wp["eta"])
 
+    v           = resp.json()["data"]["values"]
+    day         = _is_day(wp["eta"])
     precip_mm   = float(v.get("rainIntensity", 0) or v.get("precipitationIntensity", 0))
     cloud       = int(v.get("cloudCover", 50))
     chance_rain = float(v.get("precipitationProbability", 0))
@@ -136,8 +302,8 @@ async def _get_tomorrow_realtime(wp: dict, client: httpx.AsyncClient) -> Weather
         if code == 1000 and not day:
             emoji = "🌙"; description = "Clear Night"
 
-    log.debug("[Tomorrow.io REALTIME] (%.4f,%.4f) code=%s precip=%.2fmm cloud=%d%% → %s",
-              wp["lat"], wp["lng"], code, precip_mm, cloud, description)
+    log.debug("[Tomorrow.io REALTIME] (%.4f,%.4f) code=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], code, precip_mm, description)
 
     return WeatherCondition(
         status=status, label="", description=description,
@@ -151,22 +317,14 @@ async def _get_tomorrow_realtime(wp: dict, client: httpx.AsyncClient) -> Weather
 async def _get_tomorrow(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
     resp = await client.get(
         TOMORROW_FORECAST_URL,
-        params={
-            "location": f"{wp['lat']},{wp['lng']}",
-            "apikey":   settings.tomorrow_api_key,
-            "timesteps": "1h",
-            "units":    "metric",
-        },
+        params={"location": f"{wp['lat']},{wp['lng']}", "apikey": settings.tomorrow_api_key, "timesteps": "1h", "units": "metric"},
         timeout=10.0,
     )
-
     if resp.status_code == 429:
         raise _RateLimitError("Tomorrow.io")
-
     resp.raise_for_status()
-    data = resp.json()
 
-    hours = data.get("timelines", {}).get("hourly", [])
+    hours = resp.json().get("timelines", {}).get("hourly", [])
     if not hours:
         raise ValueError("Tomorrow.io returned no hourly data")
 
@@ -176,15 +334,15 @@ async def _get_tomorrow(wp: dict, client: httpx.AsyncClient) -> WeatherCondition
     ))
     v = hour["values"]
 
+    day         = _is_day(wp["eta"])
     precip_mm   = float(v.get("rainIntensity", 0) or v.get("precipitationIntensity", 0))
     cloud       = int(v.get("cloudCover", 50))
     chance_rain = float(v.get("precipitationProbability", 0))
     temp        = float(v.get("temperature", 0))
     feels       = float(v.get("temperatureApparent", temp))
     humidity    = int(v.get("humidity", 0))
-    wind_ms     = round(float(v.get("windSpeed", 0)), 1)   # already m/s from Tomorrow
+    wind_ms     = round(float(v.get("windSpeed", 0)), 1)
     code        = int(v.get("weatherCode", 1000))
-    day         = _is_day(wp["eta"])
 
     measured = _from_measurements(precip_mm, cloud, day, chance_rain)
     if measured:
@@ -194,8 +352,8 @@ async def _get_tomorrow(wp: dict, client: httpx.AsyncClient) -> WeatherCondition
         if code == 1000 and not day:
             emoji = "🌙"; description = "Clear Night"
 
-    log.debug("[Tomorrow.io] (%.4f,%.4f) code=%s precip=%.2fmm cloud=%d%% → %s",
-              wp["lat"], wp["lng"], code, precip_mm, cloud, description)
+    log.debug("[Tomorrow.io] (%.4f,%.4f) code=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], code, precip_mm, description)
 
     return WeatherCondition(
         status=status, label="", description=description,
@@ -207,10 +365,11 @@ async def _get_tomorrow(wp: dict, client: httpx.AsyncClient) -> WeatherCondition
 
 
 # ===========================================================================
-# Provider 2 — Open-Meteo  (ECMWF, fully free, no key)
+# Provider 4 — Open-Meteo (ECMWF, free, no limit)
 # ===========================================================================
 
-# WMO codes → (status, description, emoji)
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
 # fmt: off
 OPEN_METEO_CONDITIONS: dict[int, tuple[str, str, str]] = {
     0:  ("green",  "Clear",          "☀️"),
@@ -234,8 +393,6 @@ OPEN_METEO_CONDITIONS: dict[int, tuple[str, str, str]] = {
 }
 # fmt: on
 
-OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
-
 
 async def _get_open_meteo(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
     resp = await client.get(
@@ -256,28 +413,26 @@ async def _get_open_meteo(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
     resp.raise_for_status()
     data = resp.json()
 
-    times  = data["hourly"]["time"]
+    times     = data["hourly"]["time"]
     target_ts = wp["eta"].timestamp()
-
-    # Find nearest hour
-    best_i = min(
+    best_i    = min(
         range(len(times)),
         key=lambda i: abs(
             datetime.fromisoformat(times[i]).replace(tzinfo=timezone.utc).timestamp() - target_ts
         ),
     )
 
-    def h(field):
+    def hv(field):
         return data["hourly"][field][best_i]
 
-    code        = int(h("weather_code"))
-    precip_mm   = float(h("precipitation") or 0)
-    cloud       = int(h("cloud_cover") or 50)
-    chance_rain = float(h("precipitation_probability") or 0)
-    temp        = float(h("temperature_2m"))
-    feels       = float(h("apparent_temperature"))
-    humidity    = int(h("relative_humidity_2m"))
-    wind_ms     = round(float(h("wind_speed_10m")) / 3.6, 1)   # km/h → m/s
+    code        = int(hv("weather_code"))
+    precip_mm   = float(hv("precipitation") or 0)
+    cloud       = int(hv("cloud_cover") or 50)
+    chance_rain = float(hv("precipitation_probability") or 0)
+    temp        = float(hv("temperature_2m"))
+    feels       = float(hv("apparent_temperature"))
+    humidity    = int(hv("relative_humidity_2m"))
+    wind_ms     = round(float(hv("wind_speed_10m")) / 3.6, 1)
     day         = _is_day(wp["eta"])
 
     measured = _from_measurements(precip_mm, cloud, day, chance_rain)
@@ -288,8 +443,8 @@ async def _get_open_meteo(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
         if code == 0 and not day:
             emoji = "🌙"; description = "Clear Night"
 
-    log.debug("[Open-Meteo] (%.4f,%.4f) wmo=%s precip=%.2fmm cloud=%d%% → %s",
-              wp["lat"], wp["lng"], code, precip_mm, cloud, description)
+    log.debug("[Open-Meteo] (%.4f,%.4f) wmo=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], code, precip_mm, description)
 
     return WeatherCondition(
         status=status, label="", description=description,
@@ -301,7 +456,7 @@ async def _get_open_meteo(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
 
 
 # ===========================================================================
-# Provider 3 — WeatherAPI.com  (GFS model, final fallback)
+# Provider 5 — WeatherAPI.com (GFS, final fallback)
 # ===========================================================================
 
 WEATHERAPI_URL = "https://api.weatherapi.com/v1/forecast.json"
@@ -339,7 +494,7 @@ async def _get_weatherapi(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
 
     target_ts = wp["eta"].timestamp()
     if all_hours:
-        hour = min(all_hours, key=lambda h: abs(h.get("time_epoch", 0) - target_ts))
+        hour        = min(all_hours, key=lambda h: abs(h.get("time_epoch", 0) - target_ts))
         cond_obj    = hour.get("condition", {})
         code        = int(cond_obj.get("code", 1000))
         is_day_int  = int(hour.get("is_day", 1))
@@ -352,7 +507,7 @@ async def _get_weatherapi(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
         wind_ms     = round(float(hour.get("wind_kph", 0)) / 3.6, 1)
         api_desc    = cond_obj.get("text", "Clear")
     else:
-        cur = data.get("current", {})
+        cur         = data.get("current", {})
         cond_obj    = cur.get("condition", {})
         code        = int(cond_obj.get("code", 1000))
         is_day_int  = int(cur.get("is_day", 1))
@@ -378,8 +533,8 @@ async def _get_weatherapi(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
         description    = api_desc
         display_precip = chance_rain / 100
 
-    log.debug("[WeatherAPI] (%.4f,%.4f) code=%s precip=%.2fmm cloud=%d%% → %s",
-              wp["lat"], wp["lng"], code, precip_mm, cloud, description)
+    log.debug("[WeatherAPI] (%.4f,%.4f) code=%s precip=%.2fmm → %s",
+              wp["lat"], wp["lng"], code, precip_mm, description)
 
     return WeatherCondition(
         status=status, label="", description=description,
@@ -391,38 +546,53 @@ async def _get_weatherapi(wp: dict, client: httpx.AsyncClient) -> WeatherConditi
 
 
 # ===========================================================================
-# Cascade orchestrator
+# Cascade orchestrator  (XWeather → Meteoblue → Tomorrow → Open-Meteo → WeatherAPI)
 # ===========================================================================
 
-class _RateLimitError(Exception):
-    pass
-
-
 async def _get_weather_cascade(wp: dict, client: httpx.AsyncClient) -> WeatherCondition:
-    global _tomorrow_exhausted, _open_meteo_exhausted
+    global xweather_exhausted, meteoblue_exhausted, tomorrow_exhausted, open_meteo_exhausted
 
-    # ── 1st: Tomorrow.io ────────────────────────────────────────────────────
-    if not _tomorrow_exhausted and settings.tomorrow_api_key:
+    # ── 1. XWeather ─────────────────────────────────────────────────────────
+    if not xweather_exhausted and settings.xweather_client_id:
         try:
-            # Start & destination get actual real-time sensor data
+            return await _get_xweather(wp, client)
+        except _RateLimitError:
+            xweather_exhausted = True
+            log.warning("XWeather quota hit — falling back to Meteoblue")
+        except Exception as exc:
+            log.warning("XWeather error: %r — trying Meteoblue", exc)
+
+    # ── 2. Meteoblue ─────────────────────────────────────────────────────────
+    if not meteoblue_exhausted and settings.meteoblue_api_key:
+        try:
+            return await _get_meteoblue(wp, client)
+        except _RateLimitError:
+            meteoblue_exhausted = True
+            log.warning("Meteoblue quota hit — falling back to Tomorrow.io")
+        except Exception as exc:
+            log.warning("Meteoblue error: %r — trying Tomorrow.io", exc)
+
+    # ── 3. Tomorrow.io ───────────────────────────────────────────────────────
+    if not tomorrow_exhausted and settings.tomorrow_api_key:
+        try:
             if wp.get("realtime"):
                 return await _get_tomorrow_realtime(wp, client)
             return await _get_tomorrow(wp, client)
         except _RateLimitError:
-            _tomorrow_exhausted = True
+            tomorrow_exhausted = True
             log.warning("Tomorrow.io daily limit hit — falling back to Open-Meteo")
         except Exception as exc:
-            log.warning("Tomorrow.io error, trying Open-Meteo: %r", exc)
+            log.warning("Tomorrow.io error: %r — trying Open-Meteo", exc)
 
-    # ── 2nd: Open-Meteo ─────────────────────────────────────────────────────
-    if not _open_meteo_exhausted:
+    # ── 4. Open-Meteo ────────────────────────────────────────────────────────
+    if not open_meteo_exhausted:
         try:
             return await _get_open_meteo(wp, client)
         except Exception as exc:
-            log.warning("Open-Meteo error, trying WeatherAPI: %r", exc)
-            _open_meteo_exhausted = True
+            open_meteo_exhausted = True
+            log.warning("Open-Meteo error: %r — trying WeatherAPI", exc)
 
-    # ── 3rd: WeatherAPI ─────────────────────────────────────────────────────
+    # ── 5. WeatherAPI ────────────────────────────────────────────────────────
     try:
         return await _get_weatherapi(wp, client)
     except Exception as exc:

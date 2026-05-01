@@ -28,6 +28,8 @@ export function RouteForm({ onSearch, loading }: RouteFormProps) {
   const [deptTime, setDeptTime]       = useState(() => currentTime());
   const [pickerOpen, setPickerOpen]   = useState(false);
   const [locLoading, setLocLoading]   = useState(false);
+  const [gpsError, setGpsError]       = useState<string | null>(null);
+  const [autoDetected, setAutoDetected] = useState(false);
 
   const geocoder = useMapsLibrary("geocoding");
 
@@ -39,6 +41,7 @@ export function RouteForm({ onSearch, loading }: RouteFormProps) {
   const handleUseMyLocation = useCallback(() => {
     if (!navigator.geolocation) return;
     setLocLoading(true);
+    setGpsError(null);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         if (!geocoder) { setLocLoading(false); return; }
@@ -56,14 +59,25 @@ export function RouteForm({ onSearch, loading }: RouteFormProps) {
               );
               const addr = (preferred ?? results[0]).formatted_address;
               setOrigin(addr);
+              setGpsError(null);
             }
           }
         );
       },
-      () => setLocLoading(false),
+      () => {
+        setLocLoading(false);
+        setGpsError("Allow location: Chrome address bar → 🔒 → Location → Allow");
+      },
       { enableHighAccuracy: true, timeout: 8000 }
     );
   }, [geocoder]);
+
+  // Auto-detect location on first mount once geocoder is ready and origin is empty
+  useEffect(() => {
+    if (autoDetected || origin || !geocoder) return;
+    setAutoDetected(true);
+    if (navigator.geolocation) handleUseMyLocation();
+  }, [geocoder, origin, autoDetected, handleUseMyLocation]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,6 +139,13 @@ export function RouteForm({ onSearch, loading }: RouteFormProps) {
             )}
           </button>
         </div>
+
+        {/* GPS denied tip */}
+        {gpsError && (
+          <p className="px-4 pb-2 text-[11px] text-yellow-400/80 leading-snug">
+            📍 {gpsError}
+          </p>
+        )}
 
         {/* Divider + Swap */}
         <div className="relative mx-4">
@@ -292,6 +313,15 @@ function PlaceInput({ placeholder, value, onChange }: PlaceInputProps) {
     [onChange]
   );
 
+  const handleClear = useCallback(() => {
+    setInputVal("");
+    onChange("");
+    if (inputRef.current) {
+      inputRef.current.value = "";
+      inputRef.current.focus();
+    }
+  }, [onChange]);
+
   useEffect(() => {
     if (!places || !inputRef.current) return;
 
@@ -320,15 +350,29 @@ function PlaceInput({ placeholder, value, onChange }: PlaceInputProps) {
   }, [places, handleChange]);
 
   return (
-    <input
-      ref={inputRef}
-      type="text"
-      placeholder={placeholder}
-      defaultValue={value}
-      onChange={(e) => handleChange(e.target.value)}
-      autoComplete="off"
-      className="flex-1 bg-transparent text-sm text-white placeholder:text-white/25 focus:outline-none min-w-0"
-    />
+    <div className="flex-1 flex items-center gap-1 min-w-0">
+      <input
+        ref={inputRef}
+        type="text"
+        placeholder={placeholder}
+        defaultValue={value}
+        onChange={(e) => handleChange(e.target.value)}
+        autoComplete="off"
+        className="flex-1 bg-transparent text-sm text-white placeholder:text-white/25 focus:outline-none min-w-0"
+      />
+      {inputVal && (
+        <button
+          type="button"
+          onClick={handleClear}
+          aria-label="Clear input"
+          className="flex-shrink-0 w-5 h-5 flex items-center justify-center rounded-full hover:bg-white/10 transition-colors"
+        >
+          <svg className="w-2.5 h-2.5 text-white/35" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      )}
+    </div>
   );
 }
 

@@ -206,11 +206,9 @@ function MapController({
 function NavigateButton({
   following,
   onToggle,
-  hasGps,
 }: {
   following: boolean;
   onToggle: () => void;
-  hasGps: boolean;
 }) {
   return (
     <button
@@ -223,7 +221,7 @@ function NavigateButton({
       )}
     >
       <span>{following ? "📍" : "🧭"}</span>
-      {following ? "Following…" : "Go Now"}
+      {following ? "Stop" : "Go Now"}
     </button>
   );
 }
@@ -231,32 +229,81 @@ function NavigateButton({
 // ── Main map component ─────────────────────────────────────────────────────
 interface WeatherMapProps {
   data: RouteWeatherResponse;
+  onRefresh?: () => void;
 }
 
-export function WeatherMap({ data }: WeatherMapProps) {
-  const [gpsPos, setGpsPos] = useState<{ lat: number; lng: number } | null>(null);
-  const [following, setFollowing] = useState(false);
-  const [gpsError, setGpsError] = useState<string | null>(null);
-  const watchIdRef = useRef<number | null>(null);
+export function WeatherMap({ data, onRefresh }: WeatherMapProps) {
+  const [gpsPos, setGpsPos]           = useState<{ lat: number; lng: number } | null>(null);
+  const [following, setFollowing]     = useState(false);
+  const [gpsError, setGpsError]       = useState<string | null>(null);
+  const [wakeLockActive, setWakeLockActive] = useState(false);
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [minutesAgo, setMinutesAgo]   = useState(0);
 
-  const startFollowing = useCallback(() => {
+  const watchIdRef      = useRef<number | null>(null);
+  const wakeLockRef     = useRef<any>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const minuteTimerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Day/night map theme — Malaysia local time (UTC+8), 06:00-19:00 = light
+  const localHour = (new Date().getUTCHours() + 8) % 24;
+  const colorScheme = localHour >= 6 && localHour < 19 ? "LIGHT" as const : "DARK" as const;
+
+  // Release wake lock when tab is hidden
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "hidden" && wakeLockRef.current) {
+        wakeLockRef.current.release();
+        wakeLockRef.current = null;
+        setWakeLockActive(false);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, []);
+
+  const startFollowing = useCallback(async () => {
     if (!navigator.geolocation) {
       setGpsError("GPS not supported on this device.");
       return;
     }
     setGpsError(null);
     setFollowing(true);
+    setLastRefresh(new Date());
+    setMinutesAgo(0);
+
+    // Request screen wake lock
+    try {
+      if ("wakeLock" in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request("screen");
+        setWakeLockActive(true);
+        wakeLockRef.current.addEventListener("release", () => setWakeLockActive(false));
+      }
+    } catch {}
+
+    // 15-minute weather refresh interval
+    if (onRefresh) {
+      refreshTimerRef.current = setInterval(() => {
+        onRefresh();
+        setLastRefresh(new Date());
+        setMinutesAgo(0);
+      }, 15 * 60 * 1000);
+    }
+
+    // Per-minute counter for "Updated X min ago" badge
+    minuteTimerRef.current = setInterval(() => {
+      setMinutesAgo((m) => m + 1);
+    }, 60_000);
+
     watchIdRef.current = navigator.geolocation.watchPosition(
-      (pos) => {
-        setGpsPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
-      },
-      (err) => {
+      (pos) => setGpsPos({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => {
         setGpsError("Location access denied. Enable GPS in browser settings.");
         setFollowing(false);
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
-  }, []);
+  }, [onRefresh]);
 
   const stopFollowing = useCallback(() => {
     setFollowing(false);
@@ -264,19 +311,40 @@ export function WeatherMap({ data }: WeatherMapProps) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release();
+      wakeLockRef.current = null;
+      setWakeLockActive(false);
+    }
+    if (refreshTimerRef.current) {
+      clearInterval(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    }
+    if (minuteTimerRef.current) {
+      clearInterval(minuteTimerRef.current);
+      minuteTimerRef.current = null;
+    }
   }, []);
 
-  // Clean up on unmount
+  // Clean up all timers + watchers on unmount
   useEffect(() => {
     return () => {
-      if (watchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(watchIdRef.current);
-      }
+      if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+      if (wakeLockRef.current) wakeLockRef.current.release();
+      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+      if (minuteTimerRef.current) clearInterval(minuteTimerRef.current);
     };
   }, []);
 
   return (
-    <div className="relative w-full h-[480px] rounded-2xl overflow-hidden ring-1 ring-white/10">
+    <div
+      className={clsx(
+        "relative overflow-hidden ring-1 ring-white/10 transition-all",
+        following
+          ? "fixed inset-0 z-[60] rounded-none"
+          : "w-full h-[480px] rounded-2xl"
+      )}
+    >
       <Map
         mapId="redahluhh-map"
         defaultCenter={{ lat: 3.139, lng: 101.6869 }}
@@ -284,7 +352,7 @@ export function WeatherMap({ data }: WeatherMapProps) {
         gestureHandling="greedy"
         disableDefaultUI={false}
         style={{ width: "100%", height: "100%" }}
-        colorScheme="DARK"
+        colorScheme={colorScheme}
       >
         <ColoredRoute
           encodedPolyline={data.route.encoded_polyline}
@@ -301,32 +369,43 @@ export function WeatherMap({ data }: WeatherMapProps) {
         />
       </Map>
 
-      {/* Go Now / Following toggle */}
+      {/* Go Now / Stop toggle — top right */}
       <NavigateButton
         following={following}
         onToggle={following ? stopFollowing : startFollowing}
-        hasGps={!!gpsPos}
       />
 
-      {/* GPS error toast */}
+      {/* GPS error */}
       {gpsError && (
         <div className="absolute top-14 right-4 bg-red-500/90 text-white text-xs rounded-xl px-3 py-2 max-w-[200px] shadow-lg">
           {gpsError}
         </div>
       )}
 
-      {/* Legend */}
+      {/* Legend — bottom left */}
       <div className="absolute bottom-4 left-4 bg-black/70 backdrop-blur-sm rounded-xl px-3 py-2 text-xs text-white/80 space-y-1 ring-1 ring-white/10">
         <LegendRow color={SEG_COLOR.green}  label="Clear / Partly Cloudy" />
         <LegendRow color={SEG_COLOR.yellow} label="Cloudy / Light Rain" />
         <LegendRow color={SEG_COLOR.red}    label="Rain / Storm" />
       </div>
 
-      {/* Following mode indicator */}
+      {/* Following mode indicators — top left */}
       {following && (
-        <div className="absolute top-4 left-4 bg-blue-500/90 text-white text-xs font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-          Live GPS
+        <div className="absolute top-4 left-4 flex flex-col gap-1.5">
+          <div className="bg-blue-500/90 backdrop-blur-sm text-white text-xs font-semibold px-3 py-1.5 rounded-xl flex items-center gap-1.5 shadow-lg">
+            <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+            Live GPS
+            {wakeLockActive && (
+              <span className="ml-1 bg-white/25 rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide">
+                Screen On
+              </span>
+            )}
+          </div>
+          {lastRefresh && (
+            <div className="bg-black/60 backdrop-blur-sm text-white/60 text-[10px] px-2.5 py-1 rounded-lg self-start">
+              {minutesAgo === 0 ? "Updated just now" : `Updated ${minutesAgo}m ago`}
+            </div>
+          )}
         </div>
       )}
     </div>

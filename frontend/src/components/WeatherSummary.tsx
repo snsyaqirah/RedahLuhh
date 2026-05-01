@@ -80,8 +80,8 @@ export function WeatherSummary({ data, onRefresh, refreshing }: WeatherSummaryPr
             <TimelinePoint key={wp.index} waypoint={wp} isLast={i === waypoints.length - 1} />
           ))}
         </div>
-        {/* Scrollable cards */}
-        <div className="flex gap-3 overflow-x-auto pt-1 pb-2 scrollbar-thin">
+        {/* Scrollable cards — pt-2 gives ring-1 shadow room before y-clip */}
+        <div className="flex gap-3 overflow-x-auto pt-2 pb-2 scrollbar-thin">
           {waypoints.map((wp) => (
             <WeatherCard key={wp.index} waypoint={wp} />
           ))}
@@ -90,7 +90,7 @@ export function WeatherSummary({ data, onRefresh, refreshing }: WeatherSummaryPr
 
       {/* ── Refresh ─────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between text-xs text-white/25">
-        <span>Updated {format(new Date(last_updated), "HH:mm:ss")} · Tomorrow.io → Open-Meteo → WeatherAPI · Warnings: MET Malaysia</span>
+        <span>Updated {format(new Date(last_updated), "HH:mm:ss")} · XWeather → Meteoblue → Tomorrow.io → Open-Meteo → WeatherAPI · Warnings: MET Malaysia</span>
         <button
           onClick={onRefresh}
           disabled={refreshing}

@@ -27,8 +27,12 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
     setError(null);
     const { error: err } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
-    if (err) setError(err.message);
-    else onLogin();
+    if (err) {
+      setError(err.message);
+    } else {
+      try { localStorage.setItem("isAdmin", "true"); } catch {}
+      onLogin();
+    }
   }
 
   return (
@@ -71,6 +75,108 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
             {loading ? "Logging in…" : "Login"}
           </button>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Analytics section ──────────────────────────────────────────────────────
+
+interface AnalyticsData {
+  totalSearches:  number;
+  totalPageViews: number;
+  days: { date: string; searches: number; pageViews: number }[];
+}
+
+function AnalyticsSection() {
+  const [data, setData] = useState<AnalyticsData | null>(null);
+
+  useEffect(() => {
+    async function load() {
+      const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      const { data: rows } = await supabase
+        .from("analytics_events")
+        .select("event, created_at")
+        .gte("created_at", sevenDaysAgo);
+
+      if (!rows) return;
+
+      const totalSearches  = rows.filter((r) => r.event === "search").length;
+      const totalPageViews = rows.filter((r) => r.event === "page_view").length;
+
+      // Build last-7-days array
+      const days: AnalyticsData["days"] = [];
+      for (let i = 6; i >= 0; i--) {
+        const d = new Date(Date.now() - i * 24 * 60 * 60 * 1000);
+        const dateStr = d.toISOString().split("T")[0];
+        const dayRows = rows.filter((r) => r.created_at.startsWith(dateStr));
+        days.push({
+          date:     dateStr,
+          searches: dayRows.filter((r) => r.event === "search").length,
+          pageViews: dayRows.filter((r) => r.event === "page_view").length,
+        });
+      }
+
+      setData({ totalSearches, totalPageViews, days });
+    }
+    load();
+  }, []);
+
+  if (!data) {
+    return (
+      <div className="bg-[#12121e] rounded-2xl ring-1 ring-white/8 p-5 animate-pulse h-32" />
+    );
+  }
+
+  const maxSearches  = Math.max(...data.days.map((d) => d.searches), 1);
+  const maxPageViews = Math.max(...data.days.map((d) => d.pageViews), 1);
+
+  return (
+    <div className="bg-[#12121e] rounded-2xl ring-1 ring-white/8 p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xs font-semibold text-white/40 uppercase tracking-widest">Analytics — last 7 days</h2>
+        <span className="text-[10px] text-white/20">Excluding your own visits</span>
+      </div>
+
+      {/* Totals */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-white/5 rounded-xl p-3 text-center">
+          <p className="text-2xl font-bold text-white">{data.totalSearches}</p>
+          <p className="text-[11px] text-white/40 mt-0.5">Searches</p>
+        </div>
+        <div className="bg-white/5 rounded-xl p-3 text-center">
+          <p className="text-2xl font-bold text-white">{data.totalPageViews}</p>
+          <p className="text-[11px] text-white/40 mt-0.5">Page Views</p>
+        </div>
+      </div>
+
+      {/* Daily bar chart */}
+      <div>
+        <p className="text-[10px] text-white/25 mb-2 flex gap-4">
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-brand-500/70 inline-block" />Searches</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-white/20 inline-block" />Page Views</span>
+        </p>
+        <div className="flex items-end gap-1.5 h-16">
+          {data.days.map((day) => (
+            <div key={day.date} className="flex-1 flex flex-col items-center gap-0.5">
+              <div className="w-full flex items-end gap-0.5 h-12">
+                <div
+                  className="flex-1 bg-brand-500/70 rounded-t-sm min-h-[2px] transition-all"
+                  style={{ height: `${(day.searches / maxSearches) * 100}%` }}
+                  title={`${day.searches} searches`}
+                />
+                <div
+                  className="flex-1 bg-white/20 rounded-t-sm min-h-[2px] transition-all"
+                  style={{ height: `${(day.pageViews / maxPageViews) * 100}%` }}
+                  title={`${day.pageViews} views`}
+                />
+              </div>
+              <span className="text-[9px] text-white/20">
+                {new Date(day.date + "T00:00:00").toLocaleDateString("en-MY", { weekday: "narrow" })}
+              </span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -140,8 +246,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       </header>
 
       <main className="max-w-3xl mx-auto px-4 py-6 space-y-4">
+        {/* ── Analytics ── */}
+        <AnalyticsSection />
+
         {/* Filter tabs */}
-        <div className="flex gap-2">
+        <div className="flex gap-2 pt-2">
           {(["active", "hidden", "all"] as const).map((f) => (
             <button
               key={f}
@@ -287,6 +396,7 @@ export default function AdminPage() {
 
   async function handleLogout() {
     await supabase.auth.signOut();
+    try { localStorage.removeItem("isAdmin"); } catch {}
     setAuthed(false);
   }
 

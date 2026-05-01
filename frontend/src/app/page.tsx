@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { APIProvider } from "@vis.gl/react-google-maps";
 import clsx from "clsx";
 
@@ -9,7 +9,7 @@ import { RouteForm } from "@/components/RouteForm";
 import { WeatherSummary } from "@/components/WeatherSummary";
 import { useRouteWeather } from "@/hooks/useRouteWeather";
 import { useBackendHealth } from "@/hooks/useBackendHealth";
-import { RouteWeatherResponse, Waypoint } from "@/lib/types";
+import { MultiRouteWeatherResponse, RouteWeatherResponse, Waypoint } from "@/lib/types";
 
 // WeatherMap uses useMap which must run client-side
 const WeatherMap = dynamic(
@@ -18,6 +18,7 @@ const WeatherMap = dynamic(
 );
 
 const MAPS_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+const API_BASE     = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const STATUS_SCORE_BG: Record<string, string> = {
   green:  "bg-green-500/15 border-green-500/30 text-green-300",
@@ -37,11 +38,104 @@ const BACKEND_LABEL: Record<string, string> = {
   offline:  "Offline",
 };
 
+const PROVIDER_ICONS: Record<string, string> = {
+  "xweather":   "🌩️",
+  "meteoblue":  "🔵",
+  "tomorrow.io": "⚡",
+  "open-meteo": "📡",
+  "weatherapi": "🌐",
+};
+
+const PROVIDER_LABELS: Record<string, string> = {
+  "xweather":   "XWeather",
+  "meteoblue":  "Meteoblue",
+  "tomorrow.io": "Tomorrow.io",
+  "open-meteo": "Open-Meteo",
+  "weatherapi": "WeatherAPI",
+};
+
+interface ProviderStatus {
+  primary: string;
+  xweather_exhausted:   boolean;
+  meteoblue_exhausted:  boolean;
+  tomorrow_exhausted:   boolean;
+  open_meteo_exhausted: boolean;
+}
+
+interface Toast {
+  id: string;
+  message: string;
+}
+
 export default function HomePage() {
   const { data, selectedRoute, selectedIndex, setSelectedIndex, loading, error, search, refresh } =
     useRouteWeather();
   const [activeTab, setActiveTab] = useState<"map" | "summary">("map");
   const backendStatus = useBackendHealth();
+
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [toasts, setToasts]                 = useState<Toast[]>([]);
+  const seenExhaustedRef = useRef<Set<string>>(new Set());
+  const prevDataRef      = useRef<MultiRouteWeatherResponse | null>(null);
+
+  // Load seen-exhaustion set from sessionStorage after mount
+  useEffect(() => {
+    try {
+      const stored: string[] = JSON.parse(sessionStorage.getItem("rl_seen_exhausted") ?? "[]");
+      seenExhaustedRef.current = new Set(stored);
+    } catch {}
+  }, []);
+
+  // Fetch provider status after each new search result
+  useEffect(() => {
+    if (!data || data === prevDataRef.current) return;
+    prevDataRef.current = data;
+
+    fetch(`${API_BASE}/api/provider-status`)
+      .then((r) => r.json())
+      .then((status: ProviderStatus) => {
+        setProviderStatus(status);
+
+        const allExhausted =
+          status.xweather_exhausted &&
+          status.meteoblue_exhausted &&
+          status.tomorrow_exhausted &&
+          status.open_meteo_exhausted;
+
+        if (allExhausted && !seenExhaustedRef.current.has("all")) {
+          addToast("all", "⚠️ All free weather API quotas reached for today — resets at midnight MYT. Terima kasih kerana support!");
+        } else {
+          const checks: [string, boolean, string][] = [
+            ["xweather",   status.xweather_exhausted,   "XWeather quota hit — switching to Meteoblue"],
+            ["meteoblue",  status.meteoblue_exhausted,  "Meteoblue quota hit — switching to Tomorrow.io"],
+            ["tomorrow",   status.tomorrow_exhausted,   "Tomorrow.io quota hit — switching to Open-Meteo"],
+            ["open-meteo", status.open_meteo_exhausted, "Switching to WeatherAPI backup"],
+          ];
+          for (const [key, exhausted, msg] of checks) {
+            if (exhausted && !seenExhaustedRef.current.has(key)) {
+              addToast(key, msg);
+            }
+          }
+        }
+      })
+      .catch(() => {});
+  }, [data]);
+
+  function addToast(id: string, message: string) {
+    seenExhaustedRef.current.add(id);
+    try {
+      sessionStorage.setItem("rl_seen_exhausted", JSON.stringify([...seenExhaustedRef.current]));
+    } catch {}
+    setToasts((prev) => {
+      if (prev.some((t) => t.id === id)) return prev;
+      return [...prev, { id, message }];
+    });
+    setTimeout(() => dismissToast(id), 10_000);
+  }
+
+  function dismissToast(id: string) {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }
 
   const handleSearch = (origin: string, destination: string, departure?: Date) => {
     search({
@@ -73,6 +167,42 @@ export default function HomePage() {
             </div>
           </div>
         </header>
+
+        {/* ── Backend startup snackbar ── */}
+        {backendStatus !== "online" && (
+          <div
+            className={clsx(
+              "fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-3 rounded-xl shadow-xl text-sm text-center animate-fade-in w-[min(90vw,380px)]",
+              backendStatus === "checking"
+                ? "bg-dark-700 border border-white/10 text-white/70"
+                : "bg-red-900/80 border border-red-500/30 text-red-200"
+            )}
+          >
+            {backendStatus === "checking"
+              ? "🏍️ Warming up the server… this takes ~30 sec on first load (free hosting)"
+              : "Server couldn't be reached. Try refreshing."}
+          </div>
+        )}
+
+        {/* ── Toast notifications ── */}
+        {toasts.length > 0 && (
+          <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[70] flex flex-col gap-2 w-[min(90vw,380px)]">
+            {toasts.map((t) => (
+              <div
+                key={t.id}
+                className="bg-dark-700 border border-white/10 rounded-xl px-4 py-3 text-sm text-white/80 shadow-xl flex items-start gap-3 animate-fade-in"
+              >
+                <span className="flex-1 leading-snug">{t.message}</span>
+                <button
+                  onClick={() => dismissToast(t.id)}
+                  className="text-white/30 hover:text-white/60 transition-colors flex-shrink-0 mt-0.5 text-base leading-none"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ── Main ── */}
         <main className="flex-1 max-w-2xl mx-auto w-full px-4 py-6 space-y-5">
@@ -145,7 +275,7 @@ export default function HomePage() {
               {/* Tab content */}
               {activeTab === "map" ? (
                 <div className="space-y-4">
-                  <WeatherMap data={selectedRoute} />
+                  <WeatherMap data={selectedRoute} onRefresh={refresh} />
                   {/* Quick cards below map */}
                   <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-thin">
                     {selectedRoute.waypoints.map((wp) => (
@@ -166,11 +296,33 @@ export default function HomePage() {
 
         {/* ── Footer ── */}
         <footer className="border-t border-white/5 py-4 text-center text-xs text-white/20">
-          RedahLuhh by{" "}
-          <a href="https://syaqi.dev" target="_blank" rel="noopener noreferrer" className="hover:text-white/50 transition-colors underline underline-offset-2">
-            Syaqirah
-          </a>
-          {" "}· Built for Malaysian riders
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+            <span>RedahLuhh</span>
+            <span className="text-white/10">·</span>
+            <a href="/changelog" className="hover:text-white/50 transition-colors">v0.3.0</a>
+            <span className="text-white/10">·</span>
+            <span>
+              by{" "}
+              <a
+                href="https://syaqi.dev"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-white/50 transition-colors underline underline-offset-2"
+              >
+                Syaqirah
+              </a>
+            </span>
+            <span className="text-white/10">·</span>
+            <span>Built for Malaysian riders</span>
+          </div>
+          {providerStatus && (
+            <div className="mt-1.5 flex items-center justify-center gap-1">
+              <span>{PROVIDER_ICONS[providerStatus.primary] ?? "🌤️"}</span>
+              <span className="text-[10px]">
+                {PROVIDER_LABELS[providerStatus.primary] ?? providerStatus.primary}
+              </span>
+            </div>
+          )}
         </footer>
       </div>
     </APIProvider>

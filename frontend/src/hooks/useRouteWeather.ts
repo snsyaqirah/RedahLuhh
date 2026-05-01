@@ -7,6 +7,7 @@ import {
   RouteWeatherRequest,
   RouteWeatherResponse,
 } from "@/lib/types";
+import { supabase } from "@/lib/supabase";
 
 export function useRouteWeather() {
   const [data, setData] = useState<MultiRouteWeatherResponse | null>(null);
@@ -23,6 +24,17 @@ export function useRouteWeather() {
     try {
       const result = await fetchRouteWeather(req);
       setData(result);
+
+      // Track search event — skip for admin sessions
+      try {
+        const isAdmin = typeof localStorage !== "undefined" && localStorage.getItem("isAdmin") === "true";
+        if (!isAdmin) {
+          await supabase.from("analytics_events").insert({
+            event: "search",
+            meta: { route_count: result.routes.length },
+          });
+        }
+      } catch {}
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch data.");
       setData(null);

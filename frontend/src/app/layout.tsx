@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { FeedbackWidget } from "@/components/FeedbackWidget";
+import { AnalyticsTracker } from "@/components/AnalyticsTracker";
 
 const BASE_URL = "https://redahluhh.vercel.app";
 
@@ -134,6 +135,7 @@ export default function RootLayout({
       <body className="min-h-screen bg-surface-900 text-white antialiased">
         {children}
         <FeedbackWidget />
+        <AnalyticsTracker />
       </body>
     </html>
   );

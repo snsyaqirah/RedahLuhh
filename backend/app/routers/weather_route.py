@@ -21,13 +21,42 @@ from app.services.maps_service import (
     get_route,
     sample_waypoints,
 )
-from app.services.weather_service import get_weather_for_waypoints
+from app.services.weather_service import (
+    get_weather_for_waypoints,
+    xweather_exhausted,
+    meteoblue_exhausted,
+    tomorrow_exhausted,
+    open_meteo_exhausted,
+)
 from app.services.met_malaysia_service import get_active_warnings
 
 router = APIRouter(prefix="/api", tags=["weather-route"])
 limiter = Limiter(key_func=get_remote_address)
 
 _SEVERITY = {"green": 0, "yellow": 1, "red": 3}
+
+
+@router.get("/provider-status", tags=["meta"])
+async def provider_status():
+    """Return which weather provider is currently active and exhaustion flags."""
+    import app.services.weather_service as ws
+    if not ws.xweather_exhausted:
+        primary = "xweather"
+    elif not ws.meteoblue_exhausted:
+        primary = "meteoblue"
+    elif not ws.tomorrow_exhausted:
+        primary = "tomorrow.io"
+    elif not ws.open_meteo_exhausted:
+        primary = "open-meteo"
+    else:
+        primary = "weatherapi"
+    return {
+        "primary": primary,
+        "xweather_exhausted":   ws.xweather_exhausted,
+        "meteoblue_exhausted":  ws.meteoblue_exhausted,
+        "tomorrow_exhausted":   ws.tomorrow_exhausted,
+        "open_meteo_exhausted": ws.open_meteo_exhausted,
+    }
 
 
 @router.get("/debug-weather")
