@@ -82,7 +82,7 @@ export default function HomePage() {
   useEffect(() => {
     try {
       const stored: string[] = JSON.parse(sessionStorage.getItem("rl_seen_exhausted") ?? "[]");
-      seenExhaustedRef.current = new Set(stored);
+      seenExhaustedRef.current = new Set<string>(stored);
     } catch {}
   }, []);
 
@@ -124,7 +124,7 @@ export default function HomePage() {
   function addToast(id: string, message: string) {
     seenExhaustedRef.current.add(id);
     try {
-      sessionStorage.setItem("rl_seen_exhausted", JSON.stringify([...seenExhaustedRef.current]));
+      sessionStorage.setItem("rl_seen_exhausted", JSON.stringify(Array.from(seenExhaustedRef.current)));
     } catch {}
     setToasts((prev) => {
       if (prev.some((t) => t.id === id)) return prev;
